@@ -1118,20 +1118,14 @@ ngx_stream_upsync_update_peers(ngx_cycle_t *cycle,
 static ngx_int_t
 ngx_stream_upsync_consul_parse_json(void *data)
 {
-    u_char                         *p;
     ngx_buf_t                      *buf;
-    ngx_int_t                       max_fails=2, backup=0, down=0;
-    ngx_str_t                       src, dst;
     ngx_stream_upsync_ctx_t        *ctx;
     ngx_stream_upsync_conf_t       *upstream_conf = NULL;
     ngx_stream_upsync_server_t     *upsync_server = data;
 
     ctx = &upsync_server->ctx;
     buf = &ctx->body;
-
-    src.len = 0, src.data = NULL;
-    dst.len = 0, dst.data = NULL;
-
+    
     cJSON *root = cJSON_Parse((char *)buf->pos);
     if (root == NULL) {
         ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0,
@@ -1149,177 +1143,34 @@ ngx_stream_upsync_consul_parse_json(void *data)
     }
 
     cJSON *server_next;
-    for (server_next = root->child; server_next != NULL; 
-         server_next = server_next->next) 
+    for (server_next = root->child; server_next != NULL;
+         server_next = server_next->next)
     {
-        cJSON *temp1 = cJSON_GetObjectItem(server_next, "Key");
-        if (temp1 != NULL && temp1->valuestring != NULL) {
-            p = (u_char *)ngx_strrchr(temp1->valuestring, '/');
-            if (p == NULL) {
-                ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0,
-                              "upsync_parse_json: %s key format is illegal, "
-                              "contains no slash ('/')", temp1->valuestring);
-                continue;
-            } else if (ngx_stream_upsync_check_key(p) != NGX_OK) {
-                continue;
-            }
 
-            upstream_conf = ngx_array_push(&ctx->upstream_conf);
-            ngx_memzero(upstream_conf, sizeof(*upstream_conf));
-            ngx_sprintf(upstream_conf->sockaddr, "%*s", ngx_strlen(p + 1), p + 1);
+
+
+      cJSON *temp1 = cJSON_GetObjectItem(server_next, "ServiceAddress");
+      cJSON *temp2 = cJSON_GetObjectItem(server_next, "ServicePort");
+
+      if (temp1 != NULL && temp1->valuestring != NULL && temp2->valueint != 0) {
+        char parsed_addr[64] = {0};
+        sprintf(parsed_addr,"%s:%d",(char *)temp1->valuestring,(int)temp2->valueint);
+        if (ngx_stream_upsync_check_key((u_char*)parsed_addr) != NGX_OK) {
+          continue;
         }
-        temp1 = NULL;
+        upstream_conf = ngx_array_push(&ctx->upstream_conf);
+        ngx_memzero(upstream_conf, sizeof(*upstream_conf));
+        ngx_sprintf(upstream_conf->sockaddr, "%*s", strlen(parsed_addr), parsed_addr);
+      }
+      
+      upstream_conf->weight = 1;
+      upstream_conf->fail_timeout = 10;
+      upstream_conf->max_fails = 3;
 
-        temp1 = cJSON_GetObjectItem(server_next, "Value");
-        if (temp1 != NULL && temp1->valuestring != NULL) {
-
-            src.data = (u_char *)temp1->valuestring;
-            src.len = ngx_strlen(temp1->valuestring);
-
-            if (dst.data == NULL) {
-                dst.data = ngx_pcalloc(ctx->pool, 1024);
-
-            } else {
-                ngx_memzero(dst.data, 1024);
-            }
-            dst.len = 0;
-
-            ngx_decode_base64(&dst, &src);
-        }
-        temp1 = NULL;
-
-        /* default value, server attribute */
-        upstream_conf->weight = 1;
-        upstream_conf->max_fails = 2;
-        upstream_conf->fail_timeout = 10;
-
-        upstream_conf->down = 0;
-        upstream_conf->backup = 0;
-
-        p = NULL;
-
-        if (dst.data != NULL && dst.len != 0) {
-
-            p = dst.data;
-            cJSON *sub_root = cJSON_Parse((char *)p);
-            if (sub_root == NULL) {
-                ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0,
-                              "upsync_parse_json: parse attribute json failed,"
-                              "setting server attribute to default value");
-                continue;
-            }
-
-            cJSON *sub_attribute = sub_root;
-            cJSON *temp1 = cJSON_GetObjectItem(sub_attribute, "weight");
-            if (temp1 != NULL) {
-
-                if (temp1->valuestring != NULL) {
-                    upstream_conf->weight = ngx_atoi((u_char *)temp1->valuestring, 
-                                            (size_t)ngx_strlen(temp1->valuestring));
-
-                } else if (temp1->valueint >= 0) {
-                    upstream_conf->weight = temp1->valueint;
-                }
-            }
-            temp1 = NULL;
-
-            temp1 = cJSON_GetObjectItem(sub_attribute, "max_fails");
-            if (temp1 != NULL) {
-
-                if (temp1->valuestring != NULL) {
-                    max_fails = ngx_atoi((u_char *)temp1->valuestring, 
-                                         (size_t)ngx_strlen(temp1->valuestring));
-
-                } else if (temp1->valueint >= 0) {
-                    max_fails = temp1->valueint;
-                }
-            }
-            temp1 = NULL;
-
-            temp1 = cJSON_GetObjectItem(sub_attribute, "fail_timeout");
-            if (temp1 != NULL){
-
-                if (temp1->valuestring != NULL) {
-
-                    upstream_conf->fail_timeout = ngx_atoi((u_char *)temp1->valuestring, 
-                                                (size_t)ngx_strlen(temp1->valuestring));
-
-                } else if (temp1->valueint >= 0) {
-                    upstream_conf->fail_timeout = temp1->valueint;
-                }
-            }
-            temp1 = NULL;
-
-            temp1 = cJSON_GetObjectItem(sub_attribute, "down");
-            if (temp1 != NULL) {
-                    
-                if (temp1->valueint != 0) {
-                    down = temp1->valueint;
-
-                } else if (temp1->valuestring != NULL) {
-                    down = ngx_atoi((u_char *)temp1->valuestring, 
-                                    (size_t)ngx_strlen(temp1->valuestring));
-                }
-            }
-            temp1 = NULL;
-
-            temp1 = cJSON_GetObjectItem(sub_attribute, "backup");
-            if (temp1 != NULL) {
-                    
-                if (temp1->valueint != 0) {
-                    backup = temp1->valueint;
-
-                } else if (temp1->valuestring != NULL) {
-                    backup = ngx_atoi((u_char *)temp1->valuestring, 
-                                      (size_t)ngx_strlen(temp1->valuestring));
-                }
-            }
-            temp1 = NULL;
-
-            dst.len = 0;
-            cJSON_Delete(sub_root);
-        }
-
-        if (upstream_conf->weight <= 0) {
-            ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0,
-                          "upsync_parse_json: \"weight\" value is invalid"
-                          ", setting default value 1");
-            upstream_conf->weight = 1;
-        }
-
-        if (max_fails < 0) {
-            ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0,
-                          "upsync_parse_json: \"max_fails\" value is invalid"
-                          ", setting default value 2");
-        } else {
-            upstream_conf->max_fails = (ngx_uint_t)max_fails;
-        }
-
-        if (upstream_conf->fail_timeout < 0) {
-            ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0,
-                          "upsync_parse_json: \"fail_timeout\" value is invalid"
-                          ", setting default value 10");
-            upstream_conf->fail_timeout = 10;
-        }
-
-        if (down != 1 && down != 0) {
-            ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0,
-                          "upsync_parse_json: \"down\" value is invalid"
-                          ", setting default value 0");
-        } else {
-            upstream_conf->down = (ngx_uint_t)down;
-        }
-
-        if (backup != 1 && backup != 0) {
-            ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0,
-                          "upsync_parse_json: \"backup\" value is invalid"
-                          ", setting default value 0");
-        } else {
-            upstream_conf->backup = (ngx_uint_t)backup;
-        }
-
-        max_fails=2, backup=0, down=0;
+      upstream_conf->down = 0;
+      upstream_conf->backup = 0;
     }
+
     cJSON_Delete(root);
 
     return NGX_OK;
